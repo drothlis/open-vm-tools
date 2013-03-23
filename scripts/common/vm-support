@@ -1,0 +1,312 @@
+#!/bin/sh
+##########################################################
+# Copyright (C) 2006-2010 VMware, Inc. All rights reserved.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation version 2.1 and no later version.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE.  See the Lesser GNU General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA.
+#
+##########################################################
+
+# usage(): prints how to use this script
+usage()
+{
+	echo ""
+	echo "Usage: $0 [-h]"
+	echo "	-h prints this usage statement"
+	exit
+}
+
+
+TARFILE=vm-`date +%Y-%m-%d`.$$.tar
+VER=0.88
+OUTPUT_DIR=vm-support.$$
+
+# banner(): prints any number of strings padded with
+# newlines before and after.
+banner()
+{
+	echo
+	for option in "$@"
+	do
+		echo $option
+	done
+	echo
+}
+
+# The status constants are important and have to be kept
+# in sync with VMware Workstation implementation
+
+#	vm-support script is not running
+VMSUPPORT_NOT_RUNNING=0
+#	vm-support script is beginning
+VMSUPPORT_BEGINNING=1
+#	vm-support script running in progress
+VMSUPPORT_RUNNING=2
+#	vm-support script is ending
+VMSUPPORT_ENDING=3
+#	vm-support script failed
+VMSUPPORT_ERROR=10
+#	vm-support collection not supported
+VMSUPPORT_UNKNOWN=100
+
+#internal state machine state for update
+update=0
+
+# UpdateState($state): Updates the VM with the given state.
+UpdateState()
+{
+   if [ $update -eq 1 ]; then
+     vmware-xferlogs upd $1
+   fi
+}
+
+# addfile(): copies whatever files and directories you give it to
+# a self contained output directory for later tar'ing
+# Working on copies could slow this down with VERY large files but:
+# 1) We don't expect VERY large files
+# 2) Since /proc files can be copied this preserves the tree without
+#    having to cat them all into a file.
+# 3) tar barfs on open files like logs if it changes while it's tar'ing.
+#    Copying file first makes sure tar doesn't complain
+addfile()
+{
+   file=$1
+
+   dir=`dirname "$file"`
+   if [ ! -d "${OUTPUT_DIR}$dir" ]; then
+      mkdir -p "${OUTPUT_DIR}$dir"
+
+      if [ $? != 0 ]; then
+         banner "Could not create ./${OUTPUT_DIR}$dir... " \
+                "Have you run out of disk space?" "Continuing"
+         return
+      fi
+   fi
+
+   # Ignore stdout and handle errors.
+   cp -pRP "$file" "${OUTPUT_DIR}$dir" 2>/dev/null
+   if [ $? != 0 ]; then
+      banner "Could not copy '$file' to the tar area."
+   fi
+}
+
+
+# addfiles(): adds a list of files to the archive.
+addfiles()
+{
+   for i in "$@"; do
+      addfile $i
+   done
+}
+
+
+# runcmd($cmd, $out): executes the command redirected to a file and then adds
+# that file to the list of files to tar. It then deletes the temp file since
+# addfile makes a copy in its own self-contained area.
+runcmd()
+{
+	$1 > $2 2>/dev/null
+
+	if [ $? != 0 ]; then
+	   echo 3
+		banner "Either could not run $1 or could not write to $2" \
+		       "Do you have a full disk? Continuing..."
+	else
+		addfile "$2"
+		rm -f "$2"
+	fi
+}
+
+
+# error(): prints an error message using the "banner" funtion and quits.
+error()
+{
+   banner "$@"
+   UpdateState $VMSUPPORT_ERROR
+   exit 1
+}
+
+# Parse args
+for option in $@
+do
+   case $option in
+   "-h")
+      usage
+      ;;
+   "-u")
+      update=1
+      ;;
+   *)
+      usage
+      ;;
+   esac
+done
+
+#	Start message
+
+UpdateState $VMSUPPORT_BEGINNING
+
+banner "VMware UNIX Support Script $VER"
+
+#	Check for root privledge
+
+if [ `whoami` != 'root' ]; then
+   banner "You are not root, some system information can't be collected."
+fi
+
+# Source /etc/profile.  If we can't find it, it's the users problem to get
+# their paths straight.
+if [ -f /etc/profile ]; then
+	. /etc/profile
+fi
+
+# Protect against non-default values of $IFS (Not all scripts in /etc/profile.d/
+# are good citizens).
+if [ `uname` != 'SunOS' ]; then
+   unset IFS 2>/dev/null
+fi
+
+#	make a subdir to put all your files in.  die if it does not create
+mkdir $OUTPUT_DIR
+
+if [ $? != 0 ]; then
+	error "Could not create ./${OUTPUT_DIR}. Please cd to a directory to which "
+	      "you can write."
+fi
+
+banner "Collecting support information..."
+
+# Common stuff that we gather for all OSes.
+runcmd "echo vm-support version: $VER" "/tmp/vm-support-version.$$.txt"
+
+addfiles /etc/vmware-tools
+addfiles /var/log/boot*
+addfiles /var/log/secure*
+addfiles /var/log/messages*
+addfiles /var/log/syslog*
+addfiles /var/run/vmware-*
+
+runcmd "df" "/tmp/df.$$.txt"
+runcmd "ifconfig -a" "/tmp/ifconfig.$$.txt"
+runcmd "mount" "/tmp/mount.$$.txt"
+runcmd "dmesg" "/tmp/dmesg.$$.txt"
+runcmd "ulimit -a" "/tmp/ulimit-a.$$.txt"
+runcmd "uptime" "/tmp/uptime.$$.txt"
+runcmd "date" "/tmp/date.$$.txt"
+runcmd "umask" "/tmp/umask.$$.txt"
+
+
+# stageLinux(): gather information for troubleshooting Linux guests.
+stageLinux()
+{
+   # Try to collect bootloader config.
+   if [ -e /etc/lilo.conf ]; then
+      addfiles /etc/lilo.conf
+   fi
+
+   # And for grub we are not sure about the exact default location so collect them
+   # all.
+   if [ -e /boot/grub/grub.conf ]; then
+      addfile /boot/grub/grub.conf
+   fi
+   if [ -e /boot/grub/menu.lst ]; then
+      addfile /boot/grub/menu.lst
+   fi
+   if [ -e /etc/grub.conf ]; then
+      addfile /etc/grub.conf
+   fi
+
+   addfile /etc/cron.daily
+   addfile /etc/cron.hourly
+   addfile /etc/cron.monthly
+   addfile /etc/cron.weekly
+   addfile /etc/crontab
+   addfile /etc/modules.conf
+   addfile /etc/ntp.conf
+   addfile /etc/security
+   addfile /etc/services
+
+   # Commands to run ($1) and redirect to logs ($2) for inclusion.
+   runcmd "ps auwwx" "/tmp/ps-auwwx.$$.txt"
+   runcmd "lspci -H1 -M" "/tmp/lspci1.$$.txt"
+   runcmd "lspci -H1 -M -vn" "/tmp/lspci2.$$.txt"
+   runcmd "/sbin/lsmod" "/tmp/modules.$$.txt"
+   runcmd "uname -a" "/tmp/uname.$$.txt"
+   runcmd "cat /etc/issue" "/tmp/issue.$$.txt"
+   runcmd "rpm -qa" "/tmp/rpm-qa.$$.txt"
+   runcmd "netstat -lan" "/tmp/netstat-lan.$$.txt"
+   runcmd "route" "/tmp/route.$$.txt"
+   runcmd "free" "/tmp/free.$$.txt"
+}
+
+
+# stageFreeBSD(): gather information for troubleshooting FreeBSD guests.
+stageFreeBSD()
+{
+   runcmd "ps auwwx" "/tmp/ps-auwwx.$$.txt"
+}
+
+# stageSolaris(): gather information for troubleshooting Solaris guests.
+stageSolaris()
+{
+   runcmd "ps eaf" "/tmp/ps-eaf.$$.txt"
+}
+
+case `uname` in
+Linux)
+   stageLinux
+   #	tar options: 'S' for sparse core files.
+   TAR_OPTS=-cSf
+   ;;
+FreeBSD)
+   stageFreeBSD
+   TAR_OPTS=-cf
+   ;;
+SunOS)
+   stageSolaris
+   TAR_OPTS=-cf
+   ;;
+esac
+
+UpdateState $VMSUPPORT_RUNNING
+
+banner "Creating tar archive..."
+tar $TAR_OPTS $TARFILE $OUTPUT_DIR
+
+if [ $? != 0 ]; then
+	banner "The tar process did not successfully complete!" \
+	       "If tar reports that a file changed while reading, please attempt " \
+	       "to rerun this script."
+fi
+
+gzip $TARFILE
+TARFILE=${TARFILE}.gz
+
+banner "Uploading archive to host..."
+vmware-xferlogs enc $TARFILE 2>/dev/null
+
+if [ $? != 0 ]; then
+   banner "Could not transmit logs successfully: either the vmware-xferlogs " \
+          "binary is not in the path, or you are not in a virtual machine."
+fi
+
+#	Clean up temporary files
+rm -rf $OUTPUT_DIR
+
+if [ $? != 0 ]; then
+	banner "$OUTPUT_DIR was not successfully removed.  Please remove manually."
+fi
+
+UpdateState $VMSUPPORT_ENDING
+banner "Done, support data available in '$TARFILE'."
+
