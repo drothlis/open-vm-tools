@@ -91,8 +91,9 @@ static inline struct page * alloc_pages(unsigned int gfp_mask, unsigned int orde
 
 /*
  * In 2.4.10, vmtruncate was changed from returning void to returning int.
+ * In 3.8.0,  vmtruncate was removed.
  */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 4, 10)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 8, 0)
 #define compat_vmtruncate(inode, size)                                        \
 ({                                                                            \
    int result = 0;                                                            \
@@ -100,7 +101,15 @@ static inline struct page * alloc_pages(unsigned int gfp_mask, unsigned int orde
    result;                                                                    \
 })
 #else
-#define compat_vmtruncate(inode, size) vmtruncate(inode, size)
+#define compat_vmtruncate(inode, size)                                        \
+({                                                                            \
+   result = inode_newsize_ok(inode, size);                                    \
+   if (!result)                                                               \
+   {                                                                          \
+      truncate_setsize(inode, size);                                          \
+   }                                                                          \
+   result;                                                                    \
+})
 #endif
 
 
